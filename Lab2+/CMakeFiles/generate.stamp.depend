@@ -1,0 +1,10 @@
+# CMake generation dependency list for this directory.
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPackageMessage.cmake
+D:/C++ Projects/Lab2+/Lab2+/CMakeLists.txt
+D:/OpenCV/install/OpenCVConfig-version.cmake
+D:/OpenCV/install/OpenCVConfig.cmake
+D:/OpenCV/install/x64/vc17/lib/OpenCVConfig.cmake
+D:/OpenCV/install/x64/vc17/lib/OpenCVModules-debug.cmake
+D:/OpenCV/install/x64/vc17/lib/OpenCVModules-release.cmake
+D:/OpenCV/install/x64/vc17/lib/OpenCVModules.cmake
