@@ -1,1 +1,1 @@
-# binary-image-processing-with-OpenCV
+# binary image processing with OpenCV
