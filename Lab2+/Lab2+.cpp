@@ -4,248 +4,284 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <map>
+#include <windows.h>
+#include <malloc.h>
+#include <fstream>
+#include <filesystem>
 
 using namespace cv;
 using namespace std;
 
-// Класс для оптимизированного поиска ближайших точек
-class PointSearch {
-private:
-    struct Node {
-        Point point;
-        int axis;
-        Node* left;
-        Node* right;
-
-        Node(const Point& p, int a) : point(p), axis(a), left(nullptr), right(nullptr) {}
-    };
-
-    Node* root;
-
-    Node* buildTree(vector<Point>& points, int depth) {
-        if (points.empty()) return nullptr;
-
-        int axis = depth % 2;
-        auto cmp = [axis](const Point& a, const Point& b) {
-            return axis == 0 ? a.x < b.x : a.y < b.y;
-            };
-
-        size_t median = points.size() / 2;
-        nth_element(points.begin(), points.begin() + median, points.end(), cmp);
-
-        Node* node = new Node(points[median], axis);
-
-        vector<Point> leftPoints(points.begin(), points.begin() + median);
-        vector<Point> rightPoints(points.begin() + median + 1, points.end());
-
-        node->left = buildTree(leftPoints, depth + 1);
-        node->right = buildTree(rightPoints, depth + 1);
-
-        return node;
-    }
-
-    void nearestNeighbor(Node* node, const Point& target, double& bestDist, Point& bestPoint) const {
-        if (!node) return;
-
-        double dist = norm(node->point - target);
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestPoint = node->point;
-        }
-
-        int axis = node->axis;
-        double diff = axis == 0 ? target.x - node->point.x : target.y - node->point.y;
-
-        Node* first = diff < 0 ? node->left : node->right;
-        Node* second = diff < 0 ? node->right : node->left;
-
-        nearestNeighbor(first, target, bestDist, bestPoint);
-
-        if (fabs(diff) < bestDist) {
-            nearestNeighbor(second, target, bestDist, bestPoint);
-        }
-    }
-
-public:
-    PointSearch(const vector<Point>& points) {
-        if (points.empty()) {
-            root = nullptr;
-            return;
-        }
-        vector<Point> pts = points;
-        root = buildTree(pts, 0);
-    }
-
-    Point findNearest(const Point& target) const {
-        double bestDist = numeric_limits<double>::max();
-        Point bestPoint;
-        nearestNeighbor(root, target, bestDist, bestPoint);
-        return bestPoint;
-    }
-};
-
-// Структура для хранения контура с информацией о его типе
-struct ContourInfo {
+// Структура для хранения контура с флагом отверстия
+struct Contour {
     vector<Point> points;
     bool isHole;
-    PointSearch* searchTree;
-
-    ContourInfo(const vector<Point>& pts, bool hole) : points(pts), isHole(hole), searchTree(nullptr) {
-        if (!points.empty()) {
-            searchTree = new PointSearch(points);
-        }
-    }
-
-    ~ContourInfo() {
-        delete searchTree;
-    }
-
-    // Найти ближайшую точку на этом контуре к заданной точке
-    Point findNearestPoint(const Point& p) const {
-        if (!searchTree) return p;
-        return searchTree->findNearest(p);
-    }
+    int contourIdx;
 };
 
-// Найти минимальное расстояние между двумя контурами и соответствующие точки
-void findClosestPoints(const ContourInfo& contour1, const ContourInfo& contour2,
-    Point& bestP1, Point& bestP2, double& minDist) {
-    minDist = numeric_limits<double>::max();
+// Структура для графа минимального покрывающего дерева
+struct Edge {
+    int from, to;
+    double weight;
+    Point fromPt, toPt;
 
-    // Для оптимизации используем субсемплирование если контуры слишком большие
-    const int maxSamples = 500;
+    bool operator>(const Edge& other) const { return weight > other.weight; }
+};
 
-    vector<Point> samples1 = contour1.points;
-    vector<Point> samples2 = contour2.points;
+// Функция поиска минимальной пары точек между двумя контурами
+void findMinDistancePair(const vector<Point>& contour1, const vector<Point>& contour2,
+    Point& pt1, Point& pt2, double& minDist, int maxSamples = 500) {
+    minDist = (numeric_limits<double>::max)();
+
+    // Субсемплирование для ускорения
+    vector<Point> samples1 = contour1;
+    vector<Point> samples2 = contour2;
 
     if (samples1.size() > maxSamples) {
         vector<Point> temp;
         int step = samples1.size() / maxSamples;
-        for (size_t i = 0; i < samples1.size(); i += step) {
-            temp.push_back(samples1[i]);
-        }
+        for (size_t i = 0; i < samples1.size(); i += step) temp.push_back(samples1[i]);
         samples1 = temp;
     }
 
     if (samples2.size() > maxSamples) {
         vector<Point> temp;
         int step = samples2.size() / maxSamples;
-        for (size_t i = 0; i < samples2.size(); i += step) {
-            temp.push_back(samples2[i]);
-        }
+        for (size_t i = 0; i < samples2.size(); i += step) temp.push_back(samples2[i]);
         samples2 = temp;
     }
 
+    // Поиск минимального расстояния
     for (const Point& p1 : samples1) {
-        Point p2 = contour2.findNearestPoint(p1);
-        double dist = norm(p1 - p2);
+        for (const Point& p2 : samples2) {
+            double dist = norm(p1 - p2);
+            if (dist < minDist) {
+                minDist = dist;
+                pt1 = p1;
+                pt2 = p2;
+            }
+        }
+    }
+}
+
+// Функция поиска ближайшей точки на контуре
+Point findNearestPointOnContour(const vector<Point>& contour, const Point& target) {
+    double minDist = (numeric_limits<double>::max)();
+    Point bestPoint;
+
+    for (const Point& p : contour) {
+        double dist = norm(p - target);
         if (dist < minDist) {
             minDist = dist;
-            bestP1 = p1;
-            bestP2 = p2;
+            bestPoint = p;
         }
     }
+    return bestPoint;
 }
 
-// Найти индекс точки в контуре
-int findPointIndex(const vector<Point>& contour, const Point& p) {
-    for (size_t i = 0; i < contour.size(); i++) {
-        if (contour[i] == p) return i;
+// Построение MST (алгоритм Прима) для контуров
+vector<Edge> buildMST(const vector<Contour>& contours, int outerIdx) {
+    int n = contours.size();
+    vector<bool> inMST(n, false);
+    vector<Edge> mstEdges;
+
+    priority_queue<Edge, vector<Edge>, greater<Edge>> pq;
+    inMST[outerIdx] = true;
+
+    for (int i = 0; i < n; i++) {
+        if (i != outerIdx) {
+            Edge e;
+            e.from = outerIdx;
+            e.to = i;
+            findMinDistancePair(contours[outerIdx].points, contours[i].points,
+                e.fromPt, e.toPt, e.weight);
+            pq.push(e);
+        }
     }
-    return -1;
+
+    while (mstEdges.size() < n - 1 && !pq.empty()) {
+        Edge e = pq.top();
+        pq.pop();
+
+        if (inMST[e.to]) continue;
+
+        inMST[e.to] = true;
+        mstEdges.push_back(e);
+
+        for (int i = 0; i < n; i++) {
+            if (!inMST[i] && i != e.to) {
+                Edge newEdge;
+                newEdge.from = e.to;
+                newEdge.to = i;
+                findMinDistancePair(contours[e.to].points, contours[i].points,
+                    newEdge.fromPt, newEdge.toPt, newEdge.weight);
+                pq.push(newEdge);
+            }
+        }
+    }
+
+    return mstEdges;
 }
 
-// Объединить внешний контур с внутренними с минимальными разрезами
-vector<Point> mergeContoursWithHoles(ContourInfo& outer, vector<ContourInfo>& holes) {
-    if (holes.empty()) return outer.points;
-
-    struct CutInfo {
-        Point outerPoint;
-        Point holePoint;
-        double distance;
-        int holeIndex;
-
-        bool operator<(const CutInfo& other) const {
-            return distance < other.distance;
-        }
-    };
-
-    vector<CutInfo> cuts;
-
-    // Находим оптимальные разрезы для каждого отверстия
-    for (size_t i = 0; i < holes.size(); i++) {
-        Point outerPoint, holePoint;
-        double distance;
-
-        findClosestPoints(outer, holes[i], outerPoint, holePoint, distance);
-        cuts.push_back({ outerPoint, holePoint, distance, (int)i });
+// Функция вставки контура с двумя разрезами (вход и выход)
+void insertContourWithBridge(vector<Point>& mainContour, const vector<Point>& holeContour,
+    const Point& entryPt, const Point& exitPt, const Point& holeEntryPt) {
+    // Находим индексы точек в главном контуре
+    int entryIdx = -1, exitIdx = -1;
+    for (size_t i = 0; i < mainContour.size(); i++) {
+        if (mainContour[i] == entryPt) entryIdx = i;
+        if (mainContour[i] == exitPt) exitIdx = i;
     }
 
-    sort(cuts.begin(), cuts.end());
-    vector<Point> result = outer.points;
+    if (entryIdx == -1 || exitIdx == -1) return;
 
-    for (const auto& cut : cuts) {
-        const auto& hole = holes[cut.holeIndex];
-
-        // Находим индексы точек разреза в текущем результате и в отверстии
-        int outerIdx = findPointIndex(result, cut.outerPoint);
-        int holeIdx = findPointIndex(hole.points, cut.holePoint);
-
-        if (outerIdx == -1 || holeIdx == -1) continue;
-
-        vector<Point> newResult;
-        newResult.reserve(result.size() + hole.points.size() + 2);
-
-        for (int i = 0; i <= outerIdx; i++) {
-            newResult.push_back(result[i]);
+    // Находим индекс точки входа на отверстии
+    int holeEntryIdx = -1;
+    for (size_t i = 0; i < holeContour.size(); i++) {
+        if (holeContour[i] == holeEntryPt) {
+            holeEntryIdx = i;
+            break;
         }
+    }
+    if (holeEntryIdx == -1) return;
 
-        newResult.push_back(cut.holePoint);
+    vector<Point> newContour;
+    newContour.reserve(mainContour.size() + holeContour.size() + 2);
 
-        for (size_t i = 1; i <= hole.points.size(); i++) {
-            int idx = (holeIdx + i) % hole.points.size();
-            newResult.push_back(hole.points[idx]);
+    int current = entryIdx;
+    while (current != exitIdx) {
+        newContour.push_back(mainContour[current]);
+        current = (current + 1) % mainContour.size();
+    }
+    newContour.push_back(mainContour[exitIdx]);
+
+    newContour.push_back(holeEntryPt);
+
+    // Добавляем отверстие полностью
+    int holeIdx = holeEntryIdx;
+    do {
+        newContour.push_back(holeContour[holeIdx]);
+        holeIdx = (holeIdx + 1) % holeContour.size();
+    } while (holeIdx != holeEntryIdx);
+
+    newContour.push_back(holeEntryPt);
+
+    newContour.push_back(entryPt);
+
+    // Оставшаяся часть главного контура
+    current = exitIdx;
+    while (current != entryIdx) {
+        newContour.push_back(mainContour[current]);
+        current = (current + 1) % mainContour.size();
+    }
+
+    mainContour = newContour;
+}
+
+// Основная функция обработки с MST
+vector<Point> mergeContoursWithMST(vector<Contour>& contours) {
+    if (contours.empty()) return {};
+
+    // Находим внешний контур
+    int outerIdx = -1;
+    for (size_t i = 0; i < contours.size(); i++) {
+        if (!contours[i].isHole) {
+            outerIdx = i;
+            break;
         }
+    }
+    if (outerIdx == -1) return {};
 
-        newResult.push_back(cut.holePoint);
+    vector<Edge> mstEdges = buildMST(contours, outerIdx);
 
-        for (size_t i = outerIdx + 1; i < result.size(); i++) {
-            newResult.push_back(result[i]);
+    vector<vector<Edge>> adjList(contours.size());
+    for (const Edge& e : mstEdges) {
+        adjList[e.from].push_back(e);
+        Edge reverse = e;
+        reverse.from = e.to;
+        reverse.to = e.from;
+        reverse.fromPt = e.toPt;
+        reverse.toPt = e.fromPt;
+        adjList[e.to].push_back(reverse);
+    }
+
+    vector<Point> result = contours[outerIdx].points;
+    vector<bool> visited(contours.size(), false);
+    visited[outerIdx] = true;
+
+    // Очередь для BFS: (индекс контура, его точки в главном контуре)
+    queue<int> q;
+    q.push(outerIdx);
+
+    // Карта для хранения точек контуров в объединённом контуре
+    map<int, vector<Point>> contourPointsInResult;
+    contourPointsInResult[outerIdx] = result;
+
+    while (!q.empty()) {
+        int current = q.front();
+        q.pop();
+
+        for (const Edge& e : adjList[current]) {
+            if (!visited[e.to]) {
+                visited[e.to] = true;
+
+                Point currentPt = findNearestPointOnContour(contourPointsInResult[current], e.fromPt);
+                Point holePt = e.toPt;
+
+                const vector<Point>& hole = contours[e.to].points;
+                int holeEntryIdx = -1;
+                for (size_t i = 0; i < hole.size(); i++) {
+                    if (hole[i] == holePt) {
+                        holeEntryIdx = i;
+                        break;
+                    }
+                }
+
+                if (holeEntryIdx == -1) continue;
+
+                int oppositeIdx = (holeEntryIdx + hole.size() / 2) % hole.size();
+                Point holeExitPt = hole[oppositeIdx];
+
+                Point currentExitPt = findNearestPointOnContour(contourPointsInResult[current], holeExitPt);
+
+                vector<Point> currentContourCopy = contourPointsInResult[current];
+                insertContourWithBridge(currentContourCopy, hole, currentPt, currentExitPt, holePt);
+
+                result = currentContourCopy;
+                contourPointsInResult[e.to] = currentContourCopy;
+
+                q.push(e.to);
+            }
         }
-
-        result = newResult;
     }
 
     return result;
 }
 
-// Основная функция обработки
+// Основная функция обработки изображения
 vector<vector<Point>> processImage(const Mat& binaryImage) {
     vector<vector<Point>> allContours;
     vector<Vec4i> hierarchy;
 
     // Находим все контуры с иерархией
-    findContours(binaryImage, allContours, hierarchy,
-        RETR_CCOMP, CHAIN_APPROX_NONE);
+    findContours(binaryImage, allContours, hierarchy, RETR_CCOMP, CHAIN_APPROX_NONE);
 
-    vector<vector<ContourInfo>> objects;
-
-    // Проходим по иерархии и группируем контуры по объектам
+    vector<vector<Contour>> objects;
     vector<bool> processed(allContours.size(), false);
 
+    // Группируем контуры по объектам
     for (size_t i = 0; i < allContours.size(); i++) {
         if (processed[i]) continue;
 
         if (hierarchy[i][3] == -1) {
-            vector<ContourInfo> object;
-
-            object.emplace_back(allContours[i], false);
+            vector<Contour> object;
+            object.push_back({ allContours[i], false, (int)i });
             processed[i] = true;
 
-            // Ищем все внутренние контуры (отверстия) этого объекта
             int childIdx = hierarchy[i][2];
             while (childIdx != -1) {
-                object.emplace_back(allContours[childIdx], true);
+                object.push_back({ allContours[childIdx], true, childIdx });
                 processed[childIdx] = true;
                 childIdx = hierarchy[childIdx][0];
             }
@@ -256,17 +292,13 @@ vector<vector<Point>> processImage(const Mat& binaryImage) {
 
     vector<vector<Point>> resultContours;
 
+    // Обрабатываем каждый объект
     for (auto& object : objects) {
         if (object.size() == 1) {
-            // Нет отверстий - просто добавляем внешний контур
             resultContours.push_back(object[0].points);
         }
         else {
-            // Есть отверстия - объединяем
-            ContourInfo& outer = object[0];
-            vector<ContourInfo> holes(object.begin() + 1, object.end());
-
-            vector<Point> merged = mergeContoursWithHoles(outer, holes);
+            vector<Point> merged = mergeContoursWithMST(object);
             resultContours.push_back(merged);
         }
     }
@@ -275,25 +307,39 @@ vector<vector<Point>> processImage(const Mat& binaryImage) {
 }
 
 int main() {
-    Mat image = imread("D:/C++ Projects/Lab2+/Lab2+/20.png", IMREAD_GRAYSCALE);
+    locale::global(locale("ru_RU.UTF-8"));
+    wcout.imbue(locale());
+    wcin.imbue(locale());
+    wcerr.imbue(locale());
+    SetConsoleCP(65001);
+    SetConsoleOutputCP(65001);
+
+    string imagePath = "20.png";
+    ifstream testFile(imagePath);
+
+    if (!testFile.good()) {
+        cerr << "ОШИБКА: Файл " << imagePath << " не найден в рабочей директории!" << endl;
+        cerr << "Текущая рабочая директория может быть: " << filesystem::current_path() << endl;
+        return -1;
+    }
+    testFile.close();
+
+    Mat image = imread("20.png", IMREAD_GRAYSCALE);
     if (image.empty()) {
-        cerr << "Не удалось загрузить изображение!" << endl;
+        wcerr << L"Не удалось загрузить изображение!" << endl;
         return -1;
     }
 
     Mat binary;
     threshold(image, binary, 127, 255, THRESH_BINARY);
 
-    // Обработка с замером времени
     auto start = chrono::high_resolution_clock::now();
-
     vector<vector<Point>> result = processImage(binary);
-
     auto end = chrono::high_resolution_clock::now();
-    auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
 
-    cout << "Обработка заняла: " << duration.count() << " мс" << endl;
-    cout << "Найдено объектов: " << result.size() << endl;
+    auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
+    wcout << L"Обработка заняла: " << duration.count() << L" мс" << endl;
+    wcout << L"Найдено объектов: " << result.size() << endl;
 
     Mat visualization = Mat::zeros(binary.size(), CV_8UC3);
     RNG rng(12345);
@@ -305,11 +351,10 @@ int main() {
 
     imwrite("result.png", visualization);
 
-    // Вывод контуров
-    if (!result.empty()) {
-        cout << "Пример контура (первые 10 точек):" << endl;
+    if (!result.empty() && !result[0].empty()) {
+        wcout << L"Первые 10 точек первого контура:" << endl;
         for (int i = 0; i < min(10, (int)result[0].size()); i++) {
-            cout << "(" << result[0][i].x << ", " << result[0][i].y << ")" << endl;
+            cout << result[0][i] << endl;
         }
     }
 
